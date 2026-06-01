@@ -471,6 +471,13 @@ Traceroute-style diagnostics can be incomplete during a real outage. That is exp
 
 The scripts are intended for simple home or small-office diagnostics. They are not a full network monitoring system.
 
+## Acknowledgements
+
+This tool was developed with help from ChatGPT, which patiently assisted with Bash, PowerShell, cross-platform quirks, and the eternal mystery of why home internet connections always fail exactly when you need them most.
+
+Any remaining bugs are, of course, entirely human-made. Probably.
+
+
 
 ## License
 
