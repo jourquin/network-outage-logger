@@ -24,14 +24,8 @@ param(
 #   - On internet outage, runs pathping if available.
 #   - Falls back to tracert if pathping is unavailable or fails.
 #   - Diagnostic output is saved to a separate text file.
-#
-# Examples:
-#   .\network-outage-logger.ps1
-#   .\network-outage-logger.ps1 -RouterTargets 192.168.1.1
-#   .\network-outage-logger.ps1 -InternetTargets 1.1.1.1,8.8.8.8
-#   .\network-outage-logger.ps1 -TraceTool pathping -PathPingQueries 5
-#   .\network-outage-logger.ps1 -TraceTool tracert
-#   .\network-outage-logger.ps1 -TraceTool none
+
+$CsvHeader = '"start_time","end_time","duration_seconds","status","router_targets","internet_targets","os","diagnostic_file"'
 
 function Convert-ToTargetList {
     param(
@@ -89,6 +83,47 @@ function Get-DefaultGateway {
     }
 
     return $null
+}
+
+function Initialize-LogFile {
+    param(
+        [string]$LogFile,
+        [string]$CsvHeader
+    )
+
+    $directory = Split-Path -Parent $LogFile
+
+    if (-not [string]::IsNullOrWhiteSpace($directory)) {
+        if (-not (Test-Path $directory)) {
+            New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        }
+    }
+
+    if (Test-Path $LogFile) {
+        $firstLine = Get-Content -Path $LogFile -TotalCount 1 -ErrorAction SilentlyContinue
+
+        if (-not [string]::IsNullOrWhiteSpace($firstLine) -and $firstLine -ne $CsvHeader) {
+            $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+            $backupFile = "$LogFile.bak_$timestamp"
+
+            Write-Host "Existing log file has an old or incompatible CSV header."
+            Write-Host "Moving it to: $backupFile"
+
+            Move-Item -Path $LogFile -Destination $backupFile -Force
+        }
+    }
+
+    if (-not (Test-Path $LogFile) -or ((Get-Item $LogFile).Length -eq 0)) {
+        Set-Content -Path $LogFile -Value $CsvHeader -Encoding UTF8
+    }
+
+    try {
+        Add-Content -Path $LogFile -Value "" -NoNewline -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Error: log file is not writable: $LogFile" -ForegroundColor Red
+        throw
+    }
 }
 
 function Test-OneTarget {
@@ -182,7 +217,12 @@ function Invoke-CommandToFile {
     Add-Content -Path $OutputFile -Value ""
 
     try {
-        & $Command @Arguments 2>&1 | Out-File -FilePath $OutputFile -Append -Encoding utf8
+        & $Command @Arguments 2>&1 | Out-File -FilePath $OutputFile -Append -Encoding UTF8
+
+        if ($null -eq $LASTEXITCODE) {
+            return 0
+        }
+
         return $LASTEXITCODE
     }
     catch {
@@ -202,6 +242,7 @@ function Invoke-PathPingDiagnostic {
     $cmd = Get-Command pathping.exe -ErrorAction SilentlyContinue
 
     if (-not $cmd) {
+        Add-Content -Path $OutputFile -Value "pathping.exe command not found."
         return 127
     }
 
@@ -226,6 +267,7 @@ function Invoke-TracertDiagnostic {
     $cmd = Get-Command tracert.exe -ErrorAction SilentlyContinue
 
     if (-not $cmd) {
+        Add-Content -Path $OutputFile -Value "tracert.exe command not found."
         return 127
     }
 
@@ -261,7 +303,7 @@ function Invoke-InternetDiagnostic {
     }
 
     if (-not (Test-Path $DiagnosticDirectory)) {
-        New-Item -ItemType Directory -Path $DiagnosticDirectory | Out-Null
+        New-Item -ItemType Directory -Path $DiagnosticDirectory -Force | Out-Null
     }
 
     $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -284,7 +326,7 @@ function Invoke-InternetDiagnostic {
         "PathPing queries:  $PathPingQueries",
         "Max hops:          $MaxHops",
         ""
-    ) | Out-File -FilePath $outputFile -Encoding utf8
+    ) | Out-File -FilePath $outputFile -Encoding UTF8
 
     $exitCode = 0
 
@@ -357,20 +399,7 @@ function Write-OutageLog {
         diagnostic_file  = $DiagnosticFile
     }
 
-    $directory = Split-Path -Parent $LogFile
-
-    if (-not [string]::IsNullOrWhiteSpace($directory)) {
-        if (-not (Test-Path $directory)) {
-            New-Item -ItemType Directory -Path $directory | Out-Null
-        }
-    }
-
-    if (Test-Path $LogFile) {
-        $entry | Export-Csv -Path $LogFile -Append -NoTypeInformation
-    }
-    else {
-        $entry | Export-Csv -Path $LogFile -NoTypeInformation
-    }
+    $entry | Export-Csv -Path $LogFile -Append -NoTypeInformation -Encoding UTF8
 }
 
 $RouterTargets = Convert-ToTargetList -InputTargets $RouterTargets
@@ -399,6 +428,8 @@ if ($InternetTargets.Count -eq 0) {
 if ([string]::IsNullOrWhiteSpace($DiagnosticTarget)) {
     $DiagnosticTarget = $InternetTargets[0]
 }
+
+Initialize-LogFile -LogFile $LogFile -CsvHeader $CsvHeader
 
 Write-Host "Monitoring network connection..."
 Write-Host "Router target(s):    $($RouterTargets -join ', ')"

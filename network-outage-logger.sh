@@ -14,15 +14,6 @@
 #   - On internet outage, runs mtr if available.
 #   - Falls back to traceroute if mtr is unavailable or fails.
 #   - Diagnostic output is saved to a separate text file.
-#
-# Usage examples:
-#   ./network-outage-logger.sh
-#   ./network-outage-logger.sh -r 192.168.1.1
-#   ./network-outage-logger.sh -i 1.1.1.1,8.8.8.8
-#   ./network-outage-logger.sh -r 192.168.1.1 -i 1.1.1.1,8.8.8.8 -t 10
-#   ./network-outage-logger.sh -a mtr -c 5
-#   ./network-outage-logger.sh -a traceroute
-#   ./network-outage-logger.sh -a none
 
 LOGFILE="$HOME/network-outages.csv"
 DIAG_DIR="$HOME/network-outage-diagnostics"
@@ -37,6 +28,8 @@ TRACE_TOOL="auto"       # auto, mtr, traceroute, none
 MTR_CYCLES=5
 MAX_HOPS=30
 DIAGNOSTIC_TARGET=""
+
+CSV_HEADER='"start_time","end_time","duration_seconds","status","router_targets","internet_targets","os","diagnostic_file"'
 
 OS_NAME="$(uname -s)"
 PING_CMD="$(command -v ping 2>/dev/null)"
@@ -61,6 +54,10 @@ csv_escape() {
   local value="$1"
   value="${value//\"/\"\"}"
   printf '"%s"' "$value"
+}
+
+safe_file_part() {
+  echo "$1" | sed 's/[^A-Za-z0-9_.-]/_/g'
 }
 
 find_command() {
@@ -245,17 +242,56 @@ if [ -z "$DIAGNOSTIC_TARGET" ]; then
   DIAGNOSTIC_TARGET="$(first_csv_value "$INTERNET_TARGETS")"
 fi
 
+init_log_file() {
+  local log_dir
+  local first_line
+  local backup_file
+
+  log_dir="$(dirname "$LOGFILE")"
+
+  if ! mkdir -p "$log_dir"; then
+    echo "Error: could not create log directory: $log_dir" >&2
+    exit 1
+  fi
+
+  if [ -f "$LOGFILE" ]; then
+    IFS= read -r first_line < "$LOGFILE" || first_line=""
+
+    if [ -n "$first_line" ] && [ "$first_line" != "$CSV_HEADER" ]; then
+      backup_file="${LOGFILE}.bak_$(date '+%Y%m%d_%H%M%S')"
+
+      echo "Existing log file has an old or incompatible CSV header."
+      echo "Moving it to: $backup_file"
+
+      if ! mv "$LOGFILE" "$backup_file"; then
+        echo "Error: could not move old log file." >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  if [ ! -f "$LOGFILE" ] || [ ! -s "$LOGFILE" ]; then
+    if ! printf '%s\n' "$CSV_HEADER" > "$LOGFILE"; then
+      echo "Error: could not create log file: $LOGFILE" >&2
+      exit 1
+    fi
+  fi
+
+  if [ ! -w "$LOGFILE" ]; then
+    echo "Error: log file is not writable: $LOGFILE" >&2
+    exit 1
+  fi
+}
+
 ping_one() {
   local target="$1"
 
   case "$OS_NAME" in
     Darwin)
-      # macOS/BSD ping: -W is in milliseconds.
       "$PING_CMD" -c 1 -W "$PING_TIMEOUT_MS" "$target" >/dev/null 2>&1
       ;;
 
     Linux)
-      # Linux iputils ping: -W is in seconds.
       local timeout_seconds
       timeout_seconds=$(( (PING_TIMEOUT_MS + 999) / 1000 ))
 
@@ -339,6 +375,7 @@ run_mtr_diagnostic() {
 
   mtr_cmd="$(find_command mtr)"
   if [ -z "$mtr_cmd" ]; then
+    echo "mtr command not found." >> "$outfile"
     return 127
   fi
 
@@ -359,6 +396,7 @@ run_traceroute_diagnostic() {
 
   traceroute_cmd="$(find_command traceroute)"
   if [ -z "$traceroute_cmd" ]; then
+    echo "traceroute command not found." >> "$outfile"
     return 127
   fi
 
@@ -381,6 +419,7 @@ run_diagnostic() {
   local target="$DIAGNOSTIC_TARGET"
   local outfile=""
   local safe_status=""
+  local safe_target=""
   local rc=0
 
   if [ "$TRACE_TOOL" = "none" ]; then
@@ -393,10 +432,14 @@ run_diagnostic() {
     return 0
   fi
 
-  mkdir -p "$DIAG_DIR"
+  if ! mkdir -p "$DIAG_DIR"; then
+    echo ""
+    return 1
+  fi
 
-  safe_status="$(echo "$status" | sed 's/[^A-Za-z0-9_.-]/_/g')"
-  outfile="$DIAG_DIR/diagnostic_$(file_timestamp)_${safe_status}_${target}.txt"
+  safe_status="$(safe_file_part "$status")"
+  safe_target="$(safe_file_part "$target")"
+  outfile="$DIAG_DIR/diagnostic_$(file_timestamp)_${safe_status}_${safe_target}.txt"
 
   {
     echo "Network outage diagnostic"
@@ -478,11 +521,7 @@ log_outage() {
   } >> "$LOGFILE"
 }
 
-mkdir -p "$(dirname "$LOGFILE")"
-
-if [ ! -f "$LOGFILE" ]; then
-  echo '"start_time","end_time","duration_seconds","status","router_targets","internet_targets","os","diagnostic_file"' > "$LOGFILE"
-fi
+init_log_file
 
 echo "Monitoring network connection..."
 echo "Operating system:    $OS_NAME"
@@ -519,6 +558,7 @@ while true; do
       if [ "$duration" -ge "$THRESHOLD" ]; then
         log_outage "$active_start_time" "$end_time" "$duration" "$active_status" "$active_diagnostic_file"
         echo "Logged outage: $active_status, ${duration}s"
+
         if [ -n "$active_diagnostic_file" ]; then
           echo "Diagnostic file: $active_diagnostic_file"
         fi
